@@ -31,8 +31,17 @@ jobs:
       run: |
         python scripts/dq_pipeline.py
 
+    - name: List files (debug)
+      run: |
+        echo "Current directory:"
+        pwd
+        echo "Files in current directory:"
+        ls -la
+        echo "Files in root directory:"
+        ls -la ../
+
     - name: Upload validation reports
-      uses: actions/upload-artifact@v4  
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: validation-reports
