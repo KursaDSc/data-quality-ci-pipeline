@@ -21,70 +21,63 @@ def debug_dataframe(df):
     print("=" * 50)
 
 def validate_with_great_expectations(df):
-    """Run Great Expectations dataset validation"""
+    """Run Great Expectations validation using the working approach"""
     try:
         import great_expectations as gx
-        from great_expectations.core.batch import RuntimeBatchRequest
         
         print("🔍 Running Great Expectations validation...")
         
-        # Initialize GE context
+        # Create data context
         context = gx.get_context()
-        
-        # Configure datasource
-        datasource_config = {
-            "name": "validation_datasource",
-            "class_name": "Datasource",
-            "execution_engine": {"class_name": "PandasExecutionEngine"},
-            "data_connectors": {
-                "default_connector": {
-                    "class_name": "RuntimeDataConnector",
-                    "batch_identifiers": ["batch_id"],
-                }
-            }
-        }
-        context.add_datasource(**datasource_config)
-        
-        # Create batch request
-        batch_request = RuntimeBatchRequest(
-            datasource_name="validation_datasource",
-            data_connector_name="default_connector",
-            data_asset_name="amazon_orders",
-            runtime_parameters={"batch_data": df},
-            batch_identifiers={"batch_id": "ci_pipeline"},
-        )
-        
-        # Create expectation suite
-        suite_name = "ci_validation_suite"
-        context.add_expectation_suite(suite_name)
-        validator = context.get_validator(
-            batch_request=batch_request,
-            expectation_suite_name=suite_name,
-        )
-        
-        # Define expectations based on actual columns
-        actual_columns = list(df.columns)
-        
-        if 'Order ID' in actual_columns:
-            validator.expect_column_values_to_not_be_null(column="Order ID")
-            validator.expect_column_values_to_be_unique(column="Order ID")
-        
-        if 'Qty' in actual_columns:
-            validator.expect_column_values_to_be_between(column="Qty", min_value=0)
-        
-        if 'Amount' in actual_columns:
-            validator.expect_column_values_to_be_between(column="Amount", min_value=0)
-        
-        if 'Status' in actual_columns:
-            allowed_statuses = ["Delivered", "Shipped", "Processing", "Cancelled"]
-            validator.expect_column_values_to_be_in_set(
-                column="Status", 
-                value_set=allowed_statuses
+
+        # Add pandas datasource
+        datasource = context.data_sources.add_pandas(name="amazon_pandas_datasource")
+
+        # Create data asset
+        data_asset = datasource.add_dataframe_asset(name="pd_dataframe_asset")
+        batch_definition = data_asset.add_batch_definition_whole_dataframe("batch_definition")
+        batch = batch_definition.get_batch(batch_parameters={"dataframe": df})
+
+        print("✅ Fluent datasource and data asset created successfully!")
+
+        # Define all expectations
+        expectations = [
+            # 1. Order ID must not be null
+            gx.expectations.ExpectColumnValuesToNotBeNull(column="Order ID"),
+            
+            # 2. Order ID must be unique
+            gx.expectations.ExpectColumnValuesToBeUnique(column="Order ID"),
+            
+            # 3. Qty must be non-negative
+            gx.expectations.ExpectColumnValuesToBeBetween(column="Qty", min_value=0),
+            
+            # 4. Amount must be non-negative
+            gx.expectations.ExpectColumnValuesToBeBetween(column="Amount", min_value=0),
+            
+            # 5. Status must be in allowed values
+            gx.expectations.ExpectColumnValuesToBeInSet(
+                column="Status",
+                value_set=['Cancelled', 'Shipped - Delivered to Buyer', 'Shipped', 'Shipped - Returned to Seller', 'Shipped - Rejected by Buyer', 'Shipped - Lost in Transit', 'Shipped - Out for Delivery', 'Shipped - Returning to Seller', 'Shipped - Picked Up', 'Pending', 'Pending - Waiting for Pick Up', 'Shipped - Damaged', 'Shipping']
             )
-        
-        # Run validation
-        results = validator.validate()
-        return results
+        ]
+
+        print("✅ All expectations defined")
+
+        # Run validation for each expectation
+        validation_results = []
+        for i, expectation in enumerate(expectations, 1):
+            result = batch.validate(expectation)
+            validation_results.append(result)
+            print(f"✅ Validation {i}/{len(expectations)} completed: {expectation.__class__.__name__}")
+
+        print("🎉 All Great Expectations validations completed successfully!")
+
+        # Return the results for further analysis
+        return {
+            'results': validation_results,
+            'expectations': expectations,
+            'success': all(result.success for result in validation_results)
+        }
         
     except Exception as e:
         print(f"❌ Great Expectations error: {e}")
@@ -287,10 +280,42 @@ def main():
         # Run Great Expectations validation
         ge_results = validate_with_great_expectations(df)
         if ge_results:
-            validation_results['ge_success'] = ge_results.success
+            validation_results['ge_success'] = ge_results['success']
             validation_results['failed_expectations'] = len([
-                r for r in ge_results.results if not r.success
+                r for r in ge_results['results'] if not r.success
             ])
+            
+            # Quick validation results analysis for GE
+            total_expectations = len(ge_results['results'])
+            successful = sum(1 for result in ge_results['results'] if result.success)
+            failed = total_expectations - successful
+            overall_ge_success = successful == total_expectations
+
+            print(f"\n📊 Great Expectations Validation Summary")
+            print(f"Overall Status: {'✅ PASSED' if overall_ge_success else '❌ FAILED'}")
+            print(f"Successful: {successful}/{total_expectations}")
+
+            if not overall_ge_success:
+                print("\n❌ Failed expectations:")
+                for i, result in enumerate(ge_results['results']):
+                    if not result.success:
+                        exp_type = ge_results['expectations'][i].__class__.__name__
+                        print(f"  - {exp_type}")
+
+            # Detailed analysis (only if validation failed)
+            if not overall_ge_success:
+                print("\n🔍 Detailed failure analysis:")
+                for i, result in enumerate(ge_results['results']):
+                    if not result.success:
+                        exp_type = ge_results['expectations'][i].__class__.__name__
+                        print(f"\n{exp_type}:")
+                        # Check for unexpected values
+                        if hasattr(result, 'result') and hasattr(result.result, 'get'):
+                            unexpected = result.result.get('partial_unexpected_list', [])
+                            if unexpected:
+                                print(f"  Unexpected values: {unexpected[:3]}")  # Show first 3
+        else:
+            print("❌ Great Expectations validation returned no results")
         
         # Run Pydantic validation
         pydantic_results = validate_with_pydantic(df)
@@ -303,8 +328,8 @@ def main():
             if not csv_created:
                 print("❌ Failed to create CSV files")
         
-        # Print summary
-        print("\n📊 VALIDATION SUMMARY")
+        # Print overall summary
+        print("\n📊 OVERALL VALIDATION SUMMARY")
         print("=" * 50)
         print(f"Great Expectations: {'✅ PASSED' if validation_results['ge_success'] else '❌ FAILED'}")
         print(f"Pydantic Validation: {'✅ PASSED' if validation_results['pydantic_success'] else '❌ FAILED'}")
