@@ -11,6 +11,97 @@ import os
 import requests
 import json
 
+def should_send_slack_notification():
+    """
+    Determine if Slack notification should be sent based on environment
+    """
+    # Check if running in GitHub Actions
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        return True
+    
+    # Check if running in production environment
+    if os.getenv('ENVIRONMENT') == 'production':
+        return True
+    
+    # Check if explicitly enabled for local development
+    if os.getenv('SLACK_NOTIFICATIONS_ENABLED') == 'true':
+        return True
+    
+    # Default: Don't send in local development
+    return False
+
+def handle_local_notification(validation_results):
+    """Enhanced local notifications without Slack"""
+    print("\n🔔 LOCAL DEVELOPMENT ALERT")
+    print("=" * 50)
+    print("Data quality issues detected during local development:")
+    print(f"• Failed Expectations: {validation_results['failed_expectations']}")
+    print(f"• Invalid Rows: {validation_results['invalid_rows']}")
+    print("• Check files: valid_rows.csv and invalid_rows.csv")
+    print("=" * 50)
+
+def send_slack_alert(webhook_url, validation_results):
+    """Send Slack notification only in appropriate environments"""
+    
+    environment = os.getenv('ENVIRONMENT', 'local')
+    
+    # Local development - use console notifications instead of Slack
+    if not should_send_slack_notification():
+        print("🔕 Slack notifications disabled for current environment")
+        handle_local_notification(validation_results)
+        return True  # Return success to avoid failing the pipeline
+    
+    if not webhook_url:
+        print("❌ Slack webhook URL not configured")
+        return False
+    
+    try:
+        message = {
+            "attachments": [
+                {
+                    "color": "#FF0000",
+                    "title": "❌ Data Quality Validation Failed",
+                    "fields": [
+                        {
+                            "title": "Environment",
+                            "value": environment,
+                            "short": True
+                        },
+                        {
+                            "title": "Failed Expectations",
+                            "value": str(validation_results.get('failed_expectations', 0)),
+                            "short": True
+                        },
+                        {
+                            "title": "Invalid Rows", 
+                            "value": str(validation_results.get('invalid_rows', 0)),
+                            "short": True
+                        },
+                        {
+                            "title": "Repository",
+                            "value": "data-quality-ci-pipeline",
+                            "short": True
+                        }
+                    ],
+                    "footer": "GitHub Actions CI/CD Pipeline",
+                    "ts": pd.Timestamp.now().timestamp()
+                }
+            ]
+        }
+        
+        response = requests.post(webhook_url, json=message)
+        if response.status_code == 200:
+            print("✅ Slack notification sent successfully!")
+            return True
+        else:
+            print(f"❌ Slack notification failed: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error sending Slack: {e}")
+        return False
+
+# DEBUG: DataFrame Info fonksiyonu (mevcut)
 def debug_dataframe(df):
     """Debug dataframe structure"""
     print("🔍 DEBUG: DataFrame Info")
@@ -20,6 +111,7 @@ def debug_dataframe(df):
     print(df.head(2))
     print("=" * 50)
 
+# Great Expectations validation fonksiyonu (mevcut - çalışan versiyon)
 def validate_with_great_expectations(df):
     """Run Great Expectations validation using the working approach"""
     try:
@@ -85,6 +177,7 @@ def validate_with_great_expectations(df):
         traceback.print_exc()
         return None
 
+# Pydantic validation fonksiyonu (mevcut - çalışan versiyon)
 def validate_with_pydantic(df):
     """Run Pydantic row-level validation with CSV-specific column mapping"""
     try:
@@ -272,6 +365,9 @@ def create_csv_files(pydantic_results):
     try:
         if pydantic_results and pydantic_results['valid_rows']:
             valid_df = pd.DataFrame(pydantic_results['valid_rows'])
+            # Remove the validation_error column if it exists
+            if 'validation_error' in valid_df.columns:
+                valid_df = valid_df.drop(columns=['validation_error'])
             valid_df.to_csv('valid_rows.csv', index=False)
             print(f"✅ Created valid_rows.csv with {len(valid_df)} rows")
         else:
@@ -283,6 +379,11 @@ def create_csv_files(pydantic_results):
             invalid_df = pd.DataFrame(pydantic_results['invalid_rows'])
             invalid_df.to_csv('invalid_rows.csv', index=False)
             print(f"✅ Created invalid_rows.csv with {len(invalid_df)} rows")
+            
+            # Show sample of invalid rows for debugging
+            print("📋 Sample of invalid rows:")
+            for i, row in enumerate(invalid_df.head(3).to_dict('records')):
+                print(f"  Row {i+1}: {row.get('validation_error', 'Unknown error')}")
         else:
             # Create empty invalid_rows.csv if no invalid rows
             pd.DataFrame().to_csv('invalid_rows.csv', index=False)
@@ -293,50 +394,16 @@ def create_csv_files(pydantic_results):
         print(f"❌ Error creating CSV files: {e}")
         return False
 
-def send_slack_alert(webhook_url, validation_results):
-    """Send Slack notification for validation failures"""
-    try:
-        message = {
-            "attachments": [
-                {
-                    "color": "#FF0000",
-                    "title": "❌ Data Quality Validation Failed - GitHub Actions",
-                    "fields": [
-                        {
-                            "title": "Failed Expectations",
-                            "value": str(validation_results.get('failed_expectations', 0)),
-                            "short": True
-                        },
-                        {
-                            "title": "Invalid Rows", 
-                            "value": str(validation_results.get('invalid_rows', 0)),
-                            "short": True
-                        },
-                        {
-                            "title": "Repository",
-                            "value": "data-quality-ci-pipeline",
-                            "short": True
-                        }
-                    ]
-                }
-            ]
-        }
-        
-        response = requests.post(webhook_url, json=message)
-        if response.status_code == 200:
-            print("✅ Slack notification sent")
-        else:
-            print(f"❌ Slack notification failed: {response.status_code}")
-            
-    except Exception as e:
-        print(f"❌ Error sending Slack: {e}")
-
 def main():
     """Main validation pipeline"""
     print("🚀 Starting Data Quality Validation Pipeline...")
     
-    # Get Slack webhook from environment variable (set by GitHub Actions)
+    # Environment configuration
+    environment = os.getenv('ENVIRONMENT', 'local')
     slack_webhook = os.getenv('SLACK_WEBHOOK_URL')
+    
+    print(f"🏷️  Environment: {environment}")
+    print(f"📱 Slack Enabled: {should_send_slack_notification()}")
     
     try:
         # Load data
@@ -368,6 +435,7 @@ def main():
             overall_ge_success = successful == total_expectations
 
             print(f"\n📊 Great Expectations Validation Summary")
+            print("=" * 40)
             print(f"Overall Status: {'✅ PASSED' if overall_ge_success else '❌ FAILED'}")
             print(f"Successful: {successful}/{total_expectations}")
 
@@ -389,9 +457,11 @@ def main():
                         if hasattr(result, 'result') and hasattr(result.result, 'get'):
                             unexpected = result.result.get('partial_unexpected_list', [])
                             if unexpected:
-                                print(f"  Unexpected values: {unexpected[:3]}")  # Show first 3
+                                print(f"  Unexpected values: {unexpected[:3]}")
         else:
             print("❌ Great Expectations validation returned no results")
+        
+        print("\n" + "="*50)
         
         # Run Pydantic validation
         pydantic_results = validate_with_pydantic(df)
@@ -400,9 +470,12 @@ def main():
             validation_results['invalid_rows'] = pydantic_results['invalid_count']
             
             # Create CSV files
+            print("\n💾 Creating CSV files...")
             csv_created = create_csv_files(pydantic_results)
             if not csv_created:
                 print("❌ Failed to create CSV files")
+        else:
+            print("❌ Pydantic validation returned no results")
         
         # Print overall summary
         print("\n📊 OVERALL VALIDATION SUMMARY")
@@ -418,12 +491,15 @@ def main():
             validation_results['pydantic_success']
         )
         
-        # Send Slack notification if failed
-        if not overall_success and slack_webhook:
-            print("🔔 Sending Slack notification...")
-            send_slack_alert(slack_webhook, validation_results)
-        elif not overall_success:
-            print("ℹ️  Slack webhook not configured - skipping notification")
+        # Send notification if failed (environment-aware)
+        if not overall_success:
+            print("\n🔔 Handling notification...")
+            notification_sent = send_slack_alert(slack_webhook, validation_results)
+            
+            if notification_sent:
+                print("✅ Notification handled appropriately for environment")
+            else:
+                print("ℹ️  Notification skipped (environment configuration)")
         
         # Exit with appropriate code (CRITICAL for GitHub Actions)
         if overall_success:
