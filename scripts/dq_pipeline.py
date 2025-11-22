@@ -86,106 +86,142 @@ def validate_with_great_expectations(df):
         return None
 
 def validate_with_pydantic(df):
-    """Run Pydantic row-level validation"""
+    """Run Pydantic row-level validation with CSV-specific column mapping"""
     try:
         from pydantic import BaseModel, field_validator
         from datetime import datetime
         
         print("🔍 Running Pydantic row-level validation...")
         
-        # Debug: Show available columns for mapping
-        print(f"📋 Available columns: {list(df.columns)}")
+        # Debug: Show unique values for critical columns to understand data
+        print("📊 Data sample for validation columns:")
+        critical_columns = ['currency', 'ship-country']
+        for col in critical_columns:
+            if col in df.columns:
+                unique_vals = df[col].dropna().unique()
+                print(f"  {col}: {list(unique_vals[:5])}... (total: {len(unique_vals)})")
         
         class AmazonOrder(BaseModel):
-            # Use flexible field mapping based on actual CSV columns
             order_id: str
             qty: int
             amount: float
-            currency: str = "INR"  # Default value
-            ship_country: str = "IN"  # Default value
+            currency: str
+            ship_country: str
             date: str
             
             @field_validator('order_id')
             def order_id_not_empty(cls, v):
-                if not v or str(v).strip() == "":
+                if not v or str(v).strip() == "" or str(v).lower() in ['nan', 'null', 'none']:
                     raise ValueError('Order ID cannot be empty')
-                return str(v)
+                return str(v).strip()
             
             @field_validator('qty')
             def qty_non_negative(cls, v):
-                if v < 0:
-                    raise ValueError('Quantity must be ≥ 0')
-                return v
+                # Handle NaN, None, and empty values
+                if pd.isna(v) or v is None:
+                    return 0
+                try:
+                    qty_val = int(float(v))  # Handle float strings
+                    if qty_val < 0:
+                        raise ValueError('Quantity must be ≥ 0')
+                    return qty_val
+                except (ValueError, TypeError):
+                    raise ValueError('Quantity must be a valid number')
             
             @field_validator('amount')
             def amount_non_negative(cls, v):
-                if v < 0:
-                    raise ValueError('Amount must be ≥ 0')
-                return v
+                # Handle NaN, None, and empty values
+                if pd.isna(v) or v is None:
+                    return 0.0
+                try:
+                    amount_val = float(v)
+                    if amount_val < 0:
+                        raise ValueError('Amount must be ≥ 0')
+                    return round(amount_val, 2)
+                except (ValueError, TypeError):
+                    raise ValueError('Amount must be a valid number')
             
             @field_validator('currency')
             def currency_must_be_inr(cls, v):
-                # Some rows might have different currencies, we'll allow INR or empty
-                if v and v != "INR":
-                    raise ValueError(f'Currency must be INR, got {v}')
-                return v
+                # Handle NaN, None, and empty values
+                if pd.isna(v) or v is None or not str(v).strip():
+                    return "INR"  # Default value for empty/missing
+                
+                currency_val = str(v).strip().upper()
+                # Check for common INR representations
+                if currency_val in ['INR', '₹', 'RS', 'RUPEES', 'INR ']:
+                    return "INR"
+                else:
+                    raise ValueError(f'Currency must be INR, got "{v}"')
             
             @field_validator('ship_country')
             def country_must_be_india(cls, v):
-                # Some rows might have different countries, we'll allow IN or empty
-                if v and v != "IN":
-                    raise ValueError(f'Ship country must be IN, got {v}')
-                return v
+                # Handle NaN, None, and empty values
+                if pd.isna(v) or v is None or not str(v).strip():
+                    return "IN"  # Default value for empty/missing
+                
+                country_val = str(v).strip().upper()
+                # Check for common India representations
+                if country_val in ['IN', 'INDIA', 'IN ', 'IND', 'INDI']:
+                    return "IN"
+                else:
+                    raise ValueError(f'Ship country must be IN, got "{v}"')
             
             @field_validator('date')
             def validate_date_format(cls, v):
-                try:
-                    # Try multiple date formats including 2-digit year
-                    date_formats = [
-                        "%m-%d-%y",  # 05-25-22
-                        "%m-%d-%Y",  # 05-25-2022
-                        "%Y-%m-%d",  # 2022-05-25
-                        "%d-%m-%Y",  # 25-05-2022
-                        "%m/%d/%Y",  # 05/25/2022
-                        "%m/%d/%y"   # 05/25/22
-                    ]
-                    
-                    for fmt in date_formats:
-                        try:
-                            datetime.strptime(str(v), fmt)
-                            return v
-                        except ValueError:
-                            continue
-                    
-                    # If none of the formats work, check if it's already a datetime object
-                    if isinstance(v, datetime):
-                        return v.strftime("%m-%d-%Y")
-                    
-                    raise ValueError(f'Invalid date format: {v}. Expected formats: MM-DD-YY or similar')
-                except Exception as e:
-                    raise ValueError(f'Date validation error: {e}')
+                # Handle NaN, None, and empty values
+                if pd.isna(v) or v is None or not str(v).strip():
+                    raise ValueError('Date cannot be empty')
+                
+                date_str = str(v).strip()
+                
+                # Try multiple date formats that match your CSV (05-25-22)
+                date_formats = [
+                    "%m-%d-%y",  # 05-25-22 (your actual format)
+                    "%m-%d-%Y",  # 05-25-2022
+                    "%Y-%m-%d",  # 2022-05-25
+                    "%d-%m-%Y",  # 25-05-2022
+                    "%m/%d/%Y",  # 05/25/2022
+                    "%m/%d/%y",  # 05/25/22
+                    "%d-%m-%y",  # 25-05-22
+                    "%d/%m/%Y",  # 25/05/2022
+                    "%d/%m/%y"   # 25/05/22
+                ]
+                
+                for fmt in date_formats:
+                    try:
+                        parsed_date = datetime.strptime(date_str, fmt)
+                        # Return in consistent format
+                        return parsed_date.strftime("%Y-%m-%d")
+                    except ValueError:
+                        continue
+                
+                # If we get here, no format matched
+                raise ValueError(f'Invalid date format: "{date_str}". Expected formats like MM-DD-YY (05-25-22)')
         
         # Validate each row
         valid_rows = []
         invalid_rows = []
         
+        total_rows = len(df)
+        print(f"🔄 Validating {total_rows} rows...")
+        
         for index, row in df.iterrows():
+            if index % 500 == 0:  # Progress indicator
+                print(f"   Progress: {index}/{total_rows} rows...")
+                
             try:
-                # Flexible column mapping with fallbacks
+                # Direct column mapping from CSV header
                 row_data = {
-                    'order_id': row.get('Order ID', ''),
-                    'qty': row.get('Qty', 0),
-                    'amount': row.get('Amount', 0.0),
-                    'currency': row.get('currency', 'INR'),  # Default to INR
-                    'ship_country': row.get('ship-country', 'IN'),  # Default to IN
-                    'date': row.get('Date', '')
+                    'order_id': row['Order ID'],
+                    'qty': row['Qty'],
+                    'amount': row['Amount'],
+                    'currency': row['currency'],
+                    'ship_country': row['ship-country'],
+                    'date': row['Date']
                 }
                 
-                # Skip validation for completely empty rows
-                if not row_data['order_id'] and row_data['qty'] == 0 and row_data['amount'] == 0.0:
-                    print(f"⚠️  Skipping empty row {index}")
-                    continue
-                
+                # Validate the row using Pydantic
                 order = AmazonOrder(**row_data)
                 valid_rows.append(row.to_dict())
                 
@@ -194,20 +230,39 @@ def validate_with_pydantic(df):
                 invalid_row['validation_error'] = str(e)
                 invalid_row['row_index'] = index
                 invalid_rows.append(invalid_row)
-                print(f"❌ Row {index} failed: {e}")
+                
+                # Show first 5 errors for debugging
+                if len(invalid_rows) <= 5:
+                    error_msg = str(e).split('\n')[0]  # Only show first line of error
+                    print(f"❌ Row {index} failed: {error_msg}")
         
-        print(f"✅ Pydantic validation: {len(valid_rows)} valid, {len(invalid_rows)} invalid")
+        print(f"✅ Pydantic validation completed: {len(valid_rows)} valid, {len(invalid_rows)} invalid")
+        
+        # Show detailed error summary
+        if invalid_rows:
+            error_summary = {}
+            for error in invalid_rows:
+                error_msg = error['validation_error']
+                # Extract the main error type (first line before any details)
+                error_type = error_msg.split(':')[0] if ':' in error_msg else error_msg
+                error_type = error_type.split('\n')[0]  # Take only first line
+                error_summary[error_type] = error_summary.get(error_type, 0) + 1
+            
+            print("\n📊 Pydantic Error Summary:")
+            for error_type, count in error_summary.items():
+                percentage = (count / total_rows) * 100
+                print(f"  - {error_type}: {count} rows ({percentage:.1f}%)")
         
         return {
             'valid_rows': valid_rows,
             'invalid_rows': invalid_rows,
-            'total_rows': len(df),
+            'total_rows': total_rows,
             'valid_count': len(valid_rows),
             'invalid_count': len(invalid_rows)
         }
         
     except Exception as e:
-        print(f"❌ Pydantic error: {e}")
+        print(f"❌ Pydantic validation failed: {e}")
         import traceback
         traceback.print_exc()
         return None
