@@ -133,15 +133,16 @@ def validate_with_pydantic(df):
         
         for index, row in df.iterrows():
             try:
+                # Map CSV columns to Pydantic model fields
                 order = AmazonOrder(
-                    order_id=row['Order ID'],
-                    qty=row['Qty'],
-                    amount=row['Amount'],
-                    currency=row['Currency'],
-                    ship_country=row['Ship Country'],
-                    date=row['Date']
+                    order_id=row.get('Order ID', ''),
+                    qty=row.get('Qty', 0),
+                    amount=row.get('Amount', 0.0),
+                    currency=row.get('currency', ''),
+                    ship_country=row.get('ship-country', ''),
+                    date=row.get('Date', '')
                 )
-                valid_rows.append(row)
+                valid_rows.append(row.to_dict())
             except Exception as e:
                 invalid_row = row.to_dict()
                 invalid_row['validation_error'] = str(e)
@@ -229,6 +230,17 @@ def main():
         if pydantic_results:
             validation_results['pydantic_success'] = pydantic_results['invalid_count'] == 0
             validation_results['invalid_rows'] = pydantic_results['invalid_count']
+            
+            # ✅ FIX: Create CSV files for valid and invalid rows
+            if pydantic_results['valid_rows']:
+                valid_df = pd.DataFrame(pydantic_results['valid_rows'])
+                valid_df.to_csv('valid_rows.csv', index=False)
+                print(f"✅ Created valid_rows.csv with {len(valid_df)} rows")
+            
+            if pydantic_results['invalid_rows']:
+                invalid_df = pd.DataFrame(pydantic_results['invalid_rows'])
+                invalid_df.to_csv('invalid_rows.csv', index=False)
+                print(f"✅ Created invalid_rows.csv with {len(invalid_df)} rows")
         
         # Print summary
         print("\n📊 VALIDATION SUMMARY")
