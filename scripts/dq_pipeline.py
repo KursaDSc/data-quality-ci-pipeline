@@ -125,27 +125,43 @@ def validate_with_pydantic(df):
             
             @field_validator('currency')
             def currency_must_be_inr(cls, v):
-                if v != "INR":
+                # Some rows might have different currencies, we'll allow INR or empty
+                if v and v != "INR":
                     raise ValueError(f'Currency must be INR, got {v}')
                 return v
             
             @field_validator('ship_country')
             def country_must_be_india(cls, v):
-                if v != "IN":
+                # Some rows might have different countries, we'll allow IN or empty
+                if v and v != "IN":
                     raise ValueError(f'Ship country must be IN, got {v}')
                 return v
             
             @field_validator('date')
             def validate_date_format(cls, v):
                 try:
-                    # Try multiple date formats
-                    for fmt in ["%m-%d-%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"]:
+                    # Try multiple date formats including 2-digit year
+                    date_formats = [
+                        "%m-%d-%y",  # 05-25-22
+                        "%m-%d-%Y",  # 05-25-2022
+                        "%Y-%m-%d",  # 2022-05-25
+                        "%d-%m-%Y",  # 25-05-2022
+                        "%m/%d/%Y",  # 05/25/2022
+                        "%m/%d/%y"   # 05/25/22
+                    ]
+                    
+                    for fmt in date_formats:
                         try:
                             datetime.strptime(str(v), fmt)
                             return v
                         except ValueError:
                             continue
-                    raise ValueError(f'Invalid date format: {v}')
+                    
+                    # If none of the formats work, check if it's already a datetime object
+                    if isinstance(v, datetime):
+                        return v.strftime("%m-%d-%Y")
+                    
+                    raise ValueError(f'Invalid date format: {v}. Expected formats: MM-DD-YY or similar')
                 except Exception as e:
                     raise ValueError(f'Date validation error: {e}')
         
@@ -155,15 +171,20 @@ def validate_with_pydantic(df):
         
         for index, row in df.iterrows():
             try:
-                # Flexible column mapping
+                # Flexible column mapping with fallbacks
                 row_data = {
-                    'order_id': row.get('Order ID', row.get('order_id', '')),
-                    'qty': row.get('Qty', row.get('qty', 0)),
-                    'amount': row.get('Amount', row.get('amount', 0.0)),
-                    'currency': row.get('currency', 'INR'),
-                    'ship_country': row.get('ship-country', row.get('ship_country', 'IN')),
-                    'date': row.get('Date', row.get('date', ''))
+                    'order_id': row.get('Order ID', ''),
+                    'qty': row.get('Qty', 0),
+                    'amount': row.get('Amount', 0.0),
+                    'currency': row.get('currency', 'INR'),  # Default to INR
+                    'ship_country': row.get('ship-country', 'IN'),  # Default to IN
+                    'date': row.get('Date', '')
                 }
+                
+                # Skip validation for completely empty rows
+                if not row_data['order_id'] and row_data['qty'] == 0 and row_data['amount'] == 0.0:
+                    print(f"⚠️  Skipping empty row {index}")
+                    continue
                 
                 order = AmazonOrder(**row_data)
                 valid_rows.append(row.to_dict())
